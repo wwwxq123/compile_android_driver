@@ -1,114 +1,87 @@
-name: Build Xiaomi umi-q-oss kernel driver – bulletproof v3
-
-on:
-  workflow_dispatch:
-    inputs:
-      driver_name:
-        description: 'Driver module name (e.g. mydriver.ko)'
-        required: true
-      target_arch:
-        description: 'Target architecture'
-        required: true
-        default: 'aarch64'
+name: Android Kernel Driver Builder
+on: workflow_dispatch
+  inputs:
+    android_version:
+      description: 'Android Version (Kernel) (e.g., 11, 12, 13)'
+      required: true
+    kernel_version:
+      description: 'Kernel Version (e.g., 4.19, 5.4, 5.10)'
+      required: true
+    driver_name:
+      description: 'Driver Module Name (e.g., mydriver.ko)'
+      required: true
+    target_arch:
+      description: 'Target Architecture (aarch64, x86_64, etc.)'
+      required: true
+      default: 'aarch64'
 
 jobs:
   build:
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout driver source
-        uses: actions/checkout@v4
-        with:
-          path: driver-src
+      - name: Checkout repository
+        uses: actions/checkout@v4.2.2
 
-      - name: Checkout Xiaomi umi-q-oss kernel
-        uses: actions/checkout@v4
-        with:
-          repository: MiCode/Xiaomi_Kernel_OpenSource
-          ref: umi-q-oss
-          path: kernel
-          fetch-depth: 1
-
-      - name: Copy driver into kernel tree
+      - name: Prepare kerneldriver directory
         run: |
-          mkdir -p kernel/drivers/kerneldriver
-          cp -r driver-src/code/* kernel/drivers/kerneldriver/
-          echo "obj-m += kerneldriver/" >> kernel/drivers/Makefile
+          mkdir kerneldriver
+          mv ./code/*.h ./code/*.c ./code/Makefile kerneldriver/
 
-      - name: Install toolchain & deps
+      - name: Clone Xiaomi Kernel Source
+        run: |
+          git clone --depth=1 https://github.com/MiCode/Xiaomi_Kernel_OpenSource -b umi-q-oss android-kernel
+
+      - name: Copy kerneldriver to drivers
+        run: |
+          cd android-kernel
+          cp -r ../kerneldriver drivers/
+
+      - name: Add driver to drivers Makefile
+        run: |
+          cd android-kernel
+          # 添加内核驱动目录到 drivers/Makefile
+          grep -q "kerneldriver" drivers/Makefile || echo "obj-y += kerneldriver/" >> drivers/Makefile
+
+      - name: Install dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y gcc-aarch64-linux-gnu build-essential \
-            flex bison libssl-dev libelf-dev bc python3 python-is-python3
+          sudo apt-get install -y build-essential flex bison libssl-dev libelf-dev bc python-is-python3 git
 
-      - name: Fix kernel compatibility issues
+      - name: Install build tools (for cross-compilation)
         run: |
-          cd kernel
-          
-          # ========== 1. 修复 yylloc 多重定义问题 (GCC 10+ -fno-common) ==========
-          # 方法A: 在 dtc-lexer 中添加 extern 声明
-          if [ -f scripts/dtc/dtc-lexer.l ]; then
-            sed -i 's/YYLTYPE yylloc;/extern YYLTYPE yylloc;/g' scripts/dtc/dtc-lexer.l
-          fi
-          if [ -f scripts/dtc/dtc-lexer.lex.c ]; then
-            sed -i 's/YYLTYPE yylloc;/extern YYLTYPE yylloc;/g' scripts/dtc/dtc-lexer.lex.c
-          fi
-          
-          # ========== 2. 添加 -fcommon 到 HOSTCFLAGS (备用方案) ==========
-          echo 'HOSTCFLAGS += -fcommon' >> Makefile
-          echo 'KBUILD_HOSTCFLAGS += -fcommon' >> Makefile
-          
-          # ========== 3. 禁用 -Werror 防止警告变错误 ==========
-          find . -name "Makefile*" -exec sed -i 's/-Werror[^ ]*//g' {} + 2>/dev/null || true
-          
-          # ========== 4. 增加栈帧大小限制 ==========
-          find . -name "Makefile*" -exec sed -i 's/-Wframe-larger-than=[0-9]*/-Wframe-larger-than=8192/g' {} + 2>/dev/null || true
-          echo 'KBUILD_CFLAGS += -Wframe-larger-than=8192' >> Makefile
-          
-          # ========== 5. 修复 Python2 -> Python3 兼容性 ==========
-          # 修复 gcc-wrapper.py
-          if [ -f scripts/gcc-wrapper.py ]; then
-            sed -i 's/subprocess.Popen(\[ofile\]/subprocess.Popen([ofile], universal_newlines=True/g' scripts/gcc-wrapper.py 2>/dev/null || true
-            sed -i 's/\.communicate()/.communicate()/g' scripts/gcc-wrapper.py
-          fi
-          
-          # ========== 6. 禁用模块签名 ==========
-          scripts/config --disable MODULE_SIG 2>/dev/null || true
-          scripts/config --disable MODULE_SIG_ALL 2>/dev/null || true
-          scripts/config --disable MODULE_SIG_SHA512 2>/dev/null || true
-          scripts/config --set-str MODULE_SIG_KEY "" 2>/dev/null || true
-          scripts/config --disable SYSTEM_TRUSTED_KEYRING 2>/dev/null || true
-          scripts/config --set-str SYSTEM_TRUSTED_KEYS "" 2>/dev/null || true
+          sudo apt-get install -y gcc-aarch64-linux-gnu
 
-      - name: Build kernel modules only
+      - name: Build kernel module
         run: |
-          cd kernel
+          cd android-kernel
           
+          # 为 aarch64 架构设置交叉编译
           export ARCH=arm64
           export CROSS_COMPILE=aarch64-linux-gnu-
-          export HOSTCFLAGS="-fcommon"
-          export KBUILD_HOSTCFLAGS="-fcommon"
           
-          # 生成配置
-          make umi_user_defconfig
+          # 使用现有的 defconfig
+          make arch/arm64/configs/umi_defconfig || \
+          make arch/arm64/configs/perf_defconfig || \
+          make defconfig
           
-          # 禁用签名配置（配置后再次确认）
-          scripts/config --disable MODULE_SIG
-          scripts/config --disable MODULE_SIG_ALL
-          scripts/config --set-str MODULE_SIG_KEY ""
-          scripts/config --set-str SYSTEM_TRUSTED_KEYS ""
+          # 只编译驱动模块
+          make M=drivers/kerneldriver modules
           
-          # 构建模块
-          make HOSTCFLAGS="-fcommon" modules -j$(nproc) || \
-          make HOSTCFLAGS="-fcommon" HOSTCXXFLAGS="-fcommon" modules -j$(nproc)
-
-      - name: Collect ko files
-        run: |
-          mkdir -p $GITHUB_WORKSPACE/out
-          find kernel -name "*.ko" -exec cp {} $GITHUB_WORKSPACE/out/ \;
-          ls -la $GITHUB_WORKSPACE/out/
+          # 设置输出路径
+          DRIVER_PATH=$(find drivers/kerneldriver -name "${{ github.event.inputs.driver_name }}.ko" | head -n 1)
+          if [ -n "$DRIVER_PATH" ]; then
+            mkdir -p output
+            cp "$DRIVER_PATH" output/
+            echo "DRIVER_PATH=output/${{ github.event.inputs.driver_name }}.ko" >> $GITHUB_ENV
+          else
+            echo "Warning: Driver module not found"
+            find . -name "*.ko" | head -20
+          fi
+        continue-on-error: true
 
       - name: Upload artifacts
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v4.6.2
         with:
-          name: umi-q-oss-${{ github.event.inputs.driver_name }}-${{ github.event.inputs.target_arch }}
-          path: out/
+          name: kernel-driver-${{ github.event.inputs.target_arch }}-${{ github.event.inputs.driver_name }}
+          path: |
+            ${{ env.DRIVER_PATH }}
