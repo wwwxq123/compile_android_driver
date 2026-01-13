@@ -1,4 +1,4 @@
-name: Build Xiaomi umi-q-oss kernel driver – bulletproof v2
+name: Build Xiaomi umi-q-oss kernel driver – bulletproof v3
 
 on:
   workflow_dispatch:
@@ -34,60 +34,78 @@ jobs:
           cp -r driver-src/code/* kernel/drivers/kerneldriver/
           echo "obj-m += kerneldriver/" >> kernel/drivers/Makefile
 
-      - name: Increase frame-size limit
-        run: |
-          cd kernel
-          find . -name "Makefile*" -exec sed -i 's/-Wframe-larger-than=[0-9]*/-Wframe-larger-than=8192/g' {} +
-          grep -q "FRAME_WARN" Makefile || echo 'KBUILD_CFLAGS += -Wframe-larger-than=8192' >> Makefile
-
-      - name: Convert Python2→3 via 2to3
-        run: |
-          cd kernel
-          sudo apt-get update && sudo apt-get install -y 2to3
-          2to3 -w -n scripts/gcc-wrapper.py
-
-      - name: Disable host tools & module signing
-        run: |
-          cd kernel
-          # 关签名
-          for cfg in MODULE_SIG MODULE_SIG_ALL MODULE_SIG_SHA512 MODULE_SIG_KEY \
-                     SYSTEM_TRUSTED_KEYRING SYSTEM_TRUSTED_KEYS; do
-            scripts/config --disable $cfg
-          done
-          # 摘掉 dtc & sign-file
-          sed -i '/^subdir-y.*dtc/d' scripts/Makefile
-          sed -i '/^hostprogs-y.*sign-file/d' scripts/Makefile
-          sed -i '/^HOSTCFLAGS_sign-file/d'   scripts/Makefile
-          # 去掉 -Werror (这一步很重要，防止 OpenSSL 警报变成错误)
-          find scripts -name "Makefile*" -exec sed -i 's/-Werror/ /g' {} +
-
       - name: Install toolchain & deps
         run: |
           sudo apt-get update
-          sudo apt-get install -y gcc-aarch64-linux-gnu build-essential flex bison libssl-dev libelf-dev bc python3
+          sudo apt-get install -y gcc-aarch64-linux-gnu build-essential \
+            flex bison libssl-dev libelf-dev bc python3 python-is-python3
+
+      - name: Fix kernel compatibility issues
+        run: |
+          cd kernel
+          
+          # ========== 1. 修复 yylloc 多重定义问题 (GCC 10+ -fno-common) ==========
+          # 方法A: 在 dtc-lexer 中添加 extern 声明
+          if [ -f scripts/dtc/dtc-lexer.l ]; then
+            sed -i 's/YYLTYPE yylloc;/extern YYLTYPE yylloc;/g' scripts/dtc/dtc-lexer.l
+          fi
+          if [ -f scripts/dtc/dtc-lexer.lex.c ]; then
+            sed -i 's/YYLTYPE yylloc;/extern YYLTYPE yylloc;/g' scripts/dtc/dtc-lexer.lex.c
+          fi
+          
+          # ========== 2. 添加 -fcommon 到 HOSTCFLAGS (备用方案) ==========
+          echo 'HOSTCFLAGS += -fcommon' >> Makefile
+          echo 'KBUILD_HOSTCFLAGS += -fcommon' >> Makefile
+          
+          # ========== 3. 禁用 -Werror 防止警告变错误 ==========
+          find . -name "Makefile*" -exec sed -i 's/-Werror[^ ]*//g' {} + 2>/dev/null || true
+          
+          # ========== 4. 增加栈帧大小限制 ==========
+          find . -name "Makefile*" -exec sed -i 's/-Wframe-larger-than=[0-9]*/-Wframe-larger-than=8192/g' {} + 2>/dev/null || true
+          echo 'KBUILD_CFLAGS += -Wframe-larger-than=8192' >> Makefile
+          
+          # ========== 5. 修复 Python2 -> Python3 兼容性 ==========
+          # 修复 gcc-wrapper.py
+          if [ -f scripts/gcc-wrapper.py ]; then
+            sed -i 's/subprocess.Popen(\[ofile\]/subprocess.Popen([ofile], universal_newlines=True/g' scripts/gcc-wrapper.py 2>/dev/null || true
+            sed -i 's/\.communicate()/.communicate()/g' scripts/gcc-wrapper.py
+          fi
+          
+          # ========== 6. 禁用模块签名 ==========
+          scripts/config --disable MODULE_SIG 2>/dev/null || true
+          scripts/config --disable MODULE_SIG_ALL 2>/dev/null || true
+          scripts/config --disable MODULE_SIG_SHA512 2>/dev/null || true
+          scripts/config --set-str MODULE_SIG_KEY "" 2>/dev/null || true
+          scripts/config --disable SYSTEM_TRUSTED_KEYRING 2>/dev/null || true
+          scripts/config --set-str SYSTEM_TRUSTED_KEYS "" 2>/dev/null || true
 
       - name: Build kernel modules only
         run: |
           cd kernel
           
-          # --- 修复部分 (v3) ---
-          # 我们只针对特定目标进行屏蔽，保留 basic/fixdep
-          # 这会阻止 Make 尝试构建 scripts/dtc 和 scripts/mod/sign-file
-          echo "scripts/dtc:" >> Makefile
-          echo "	@echo 'Skipping dtc build due to host toolchain issues'" >> Makefile
-          echo "scripts/mod/sign-file:" >> Makefile
-          echo "	@echo 'Skipping sign-file build due to OpenSSL issues'" >> Makefile
-          # ---------------------
-
           export ARCH=arm64
           export CROSS_COMPILE=aarch64-linux-gnu-
+          export HOSTCFLAGS="-fcommon"
+          export KBUILD_HOSTCFLAGS="-fcommon"
+          
+          # 生成配置
           make umi_user_defconfig
-          make modules -j$(nproc)
+          
+          # 禁用签名配置（配置后再次确认）
+          scripts/config --disable MODULE_SIG
+          scripts/config --disable MODULE_SIG_ALL
+          scripts/config --set-str MODULE_SIG_KEY ""
+          scripts/config --set-str SYSTEM_TRUSTED_KEYS ""
+          
+          # 构建模块
+          make HOSTCFLAGS="-fcommon" modules -j$(nproc) || \
+          make HOSTCFLAGS="-fcommon" HOSTCXXFLAGS="-fcommon" modules -j$(nproc)
 
       - name: Collect ko files
         run: |
           mkdir -p $GITHUB_WORKSPACE/out
           find kernel -name "*.ko" -exec cp {} $GITHUB_WORKSPACE/out/ \;
+          ls -la $GITHUB_WORKSPACE/out/
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
