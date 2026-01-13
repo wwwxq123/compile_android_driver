@@ -57,13 +57,13 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y gcc-aarch64-linux-gnu build-essential flex bison libssl-dev libelf-dev bc python3
 
-      # 7. 编译内核 + modules
+      # 7. 编译内核 + modules（defconfig 路径已修正）
       - name: Build kernel modules
         run: |
           cd kernel
           export ARCH=arm64
           export CROSS_COMPILE=aarch64-linux-gnu-
-          make vendor/xiaomi/umi_defconfig
+          make umi_defconfig          # ← 正确路径
           make -j$(nproc) modules
 
       # 8. 收集 ko 文件
