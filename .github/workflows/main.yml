@@ -1,28 +1,52 @@
-- name: Build kernel modules only
+name: Build Xiaomi umi-q-oss kernel driver – bulletproof v2
+
+on:
+  workflow_dispatch:
+    inputs:
+      driver_name:
+        description: 'Driver module name (e.g. mydriver.ko)'
+        required: true
+      target_arch:
+        description: 'Target architecture'
+        required: true
+        default: 'aarch64'
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout driver source
+        uses: actions/checkout@v4
+        with:
+          path: driver-src
+
+      - name: Checkout Xiaomi umi-q-oss kernel
+        uses: actions/checkout@v4
+        with:
+          repository: MiCode/Xiaomi_Kernel_OpenSource
+          ref: umi-q-oss
+          path: kernel
+          fetch-depth: 1
+
+      - name: Copy driver into kernel tree
         run: |
-          cd kernel
-          export ARCH=arm64
-          export CROSS_COMPILE=aarch64-linux-gnu-
-          make umi_user_defconfig
-          make modules -j$(nproc)          cp -r driver-src/code/* kernel/drivers/kerneldriver/
+          mkdir -p kernel/drivers/kerneldriver
+          cp -r driver-src/code/* kernel/drivers/kerneldriver/
           echo "obj-m += kerneldriver/" >> kernel/drivers/Makefile
 
-      # 4. 放大帧栈门限
       - name: Increase frame-size limit
         run: |
           cd kernel
           find . -name "Makefile*" -exec sed -i 's/-Wframe-larger-than=[0-9]*/-Wframe-larger-than=8192/g' {} +
           grep -q "FRAME_WARN" Makefile || echo 'KBUILD_CFLAGS += -Wframe-larger-than=8192' >> Makefile
 
-      # 5. Python2→3
       - name: Convert Python2→3 via 2to3
         run: |
           cd kernel
           sudo apt-get update && sudo apt-get install -y 2to3
           2to3 -w -n scripts/gcc-wrapper.py
 
-      # 6. 关闭模块签名 + 摘掉 **全部** host 工具（dtc & sign-file）
-      - name: Disable host tools that break with OpenSSL 3 / dtc
+      - name: Disable host tools & module signing
         run: |
           cd kernel
           # 关签名
@@ -30,20 +54,18 @@
                      SYSTEM_TRUSTED_KEYRING SYSTEM_TRUSTED_KEYS; do
             scripts/config --disable $cfg
           done
-          # 摘掉 dtc 相关目标
-          sed -i '/^hostprogs-y.*dtc/d' scripts/Makefile
-          sed -i '/^HOSTCFLAGS.*dtc/d' scripts/Makefile
-          # 摘掉 sign-file 相关目标
+          # 摘掉 dtc & sign-file
+          sed -i '/^subdir-y.*dtc/d' scripts/Makefile
           sed -i '/^hostprogs-y.*sign-file/d' scripts/Makefile
           sed -i '/^HOSTCFLAGS_sign-file/d'   scripts/Makefile
+          # 去掉 -Werror
+          find scripts -name "Makefile*" -exec sed -i 's/-Werror/ /g' {} +
 
-      # 7. 装依赖
       - name: Install toolchain & deps
         run: |
           sudo apt-get update
           sudo apt-get install -y gcc-aarch64-linux-gnu build-essential flex bison libssl-dev libelf-dev bc python3
 
-      # 8. 只编 modules（不碰 Image/zImage，也不编 scripts）
       - name: Build kernel modules only
         run: |
           cd kernel
@@ -52,13 +74,11 @@
           make umi_user_defconfig
           make modules -j$(nproc)
 
-      # 9. 收集 ko
       - name: Collect ko files
         run: |
           mkdir -p $GITHUB_WORKSPACE/out
           find kernel -name "*.ko" -exec cp {} $GITHUB_WORKSPACE/out/ \;
 
-      # 10. 上传
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
