@@ -1,20 +1,20 @@
 name: Android Kernel Driver Builder
-on: workflow_dispatch
-  inputs:
-    android_version:
-      description: 'Android Version (Kernel) (e.g., 11, 12, 13)'
-      required: true
-    kernel_version:
-      description: 'Kernel Version (e.g., 4.19, 5.4, 5.10)'
-      required: true
-    driver_name:
-      description: 'Driver Module Name (e.g., mydriver.ko)'
-      required: true
-    target_arch:
-      description: 'Target Architecture (aarch64, x86_64, etc.)'
-      required: true
-      default: 'aarch64'
-
+on:
+  workflow_dispatch:
+    inputs:
+      android_version:
+        description: 'Android Version (Kernel) (e.g., 14)'
+        required: true
+      kernel_version:
+        description: 'Kernel Version (e.g., 6.1)'
+        required: true
+      driver_name:
+        description: 'Driver Module Name (e.g., mydriver.ko)'
+        required: true
+      target_arch:
+        description: 'Target Architecture (aarch64, x86_64, etc.)'
+        required: true
+        default: 'aarch64'
 jobs:
   build:
     runs-on: ubuntu-latest
@@ -27,61 +27,83 @@ jobs:
           mkdir kerneldriver
           mv ./code/*.h ./code/*.c ./code/Makefile kerneldriver/
 
-      - name: Clone Xiaomi Kernel Source
+      - name: Install repo tool
         run: |
-          git clone --depth=1 https://github.com/MiCode/Xiaomi_Kernel_OpenSource -b umi-q-oss android-kernel
+          sudo curl -L https://storage.googleapis.com/git-repo-downloads/repo -o /usr/local/bin/repo
+          sudo chmod a+x /usr/local/bin/repo
 
-      - name: Copy kerneldriver to drivers
+      - name: Set up Xiaomi Kernel source
+        run: |
+          mkdir -p android-kernel && cd android-kernel
+          repo init -u https://github.com/MiCode/Xiaomi_Kernel_OpenSource -b umi-q-oss
+          repo sync -j$(nproc) -c --no-tags --optimized-fetch --force-sync
+
+      - name: Copy kerneldriver
         run: |
           cd android-kernel
-          cp -r ../kerneldriver drivers/
+          cp -r ../kerneldriver common/drivers
 
-      - name: Add driver to drivers Makefile
+      - name: Modify Makefile
         run: |
           cd android-kernel
-          # 添加内核驱动目录到 drivers/Makefile
-          grep -q "kerneldriver" drivers/Makefile || echo "obj-y += kerneldriver/" >> drivers/Makefile
+          echo "obj-y += kerneldriver/" >> common/drivers/Makefile
+
+      - name: Add module to GKI modules list
+        if: ${{ github.event.inputs.android_version > 13 }}
+        run: |
+          cd android-kernel
+          MODULE_NAME="drivers/kerneldriver/${{ github.event.inputs.driver_name }}"
+          awk -i inplace -v module="$MODULE_NAME" '
+            BEGIN { added=0 }
+            /_COMMON_GKI_MODULES_LIST = \ / { in_list=1 }
+            in_list && /\ / { if (!added) { print " \"" module "\"," added=1 } in_list=0 }
+            in_list && !added { if (module < $0) { print " \"" module "\"," added=1 } }
+            { print }
+          ' common/modules.bzl
+
+      - name: Prepare module list for legacy builds
+        if: ${{ github.event.inputs.android_version <= 13 }}
+        run: |
+          cd android-kernel
+          echo "drivers/kerneldriver/${{ github.event.inputs.driver_name }}" >> common/android/gki_${{ github.event.inputs.target_arch }}_modules
+
+      - name: Increase stack frame size limit
+        run: |
+          cd android-kernel
+          find . -type f -name "Makefile*" -exec sed -i 's/-Wframe-larger-than= 0-9 */-Wframe-larger-than=4096/g' {} +
+          grep -q "FRAME_WARN" common/Makefile || echo 'KBUILD_CFLAGS += -Wframe-larger-than=4096' >> common/Makefile
 
       - name: Install dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y build-essential flex bison libssl-dev libelf-dev bc python-is-python3 git
+          sudo apt-get install -y build-essential flex bison libssl-dev libelf-dev bc python-is-python3
 
-      - name: Install build tools (for cross-compilation)
+      - name: Fix missing kprobe symbols for Android 13
+        if: ${{ github.event.inputs.android_version == 13 }}
         run: |
-          sudo apt-get install -y gcc-aarch64-linux-gnu
+          cd android-kernel
+          for symbol in register_kprobe unregister_kprobe; do
+            grep -q "$symbol" common/android/abi_gki_${{ github.event.inputs.target_arch }} || \
+            echo "$symbol" >> common/android/abi_gki_${{ github.event.inputs.target_arch }}
+          done
+          sed -i '/EXPORT_SYMBOL(unregister_kprobe);/a EXPORT_SYMBOL(register_kprobe);' common/kernel/kprobes.c
 
       - name: Build kernel module
         run: |
           cd android-kernel
-          
-          # 为 aarch64 架构设置交叉编译
-          export ARCH=arm64
-          export CROSS_COMPILE=aarch64-linux-gnu-
-          
-          # 使用现有的 defconfig
-          make arch/arm64/configs/umi_defconfig || \
-          make arch/arm64/configs/perf_defconfig || \
-          make defconfig
-          
-          # 只编译驱动模块
-          make M=drivers/kerneldriver modules
-          
-          # 设置输出路径
-          DRIVER_PATH=$(find drivers/kerneldriver -name "${{ github.event.inputs.driver_name }}.ko" | head -n 1)
-          if [ -n "$DRIVER_PATH" ]; then
-            mkdir -p output
-            cp "$DRIVER_PATH" output/
-            echo "DRIVER_PATH=output/${{ github.event.inputs.driver_name }}.ko" >> $GITHUB_ENV
+          if [[ ${{ github.event.inputs.android_version }} -le 13 ]]; then
+            BUILD_CONFIG=common/build.config.gki.${{ github.event.inputs.target_arch }}
+            LTO=thin build/build.sh -j32 OUTPUT_PATH="out/android${{ github.event.inputs.android_version }}-${{ github.event.inputs.kernel_version }}/dist"
           else
-            echo "Warning: Driver module not found"
-            find . -name "*.ko" | head -20
+            echo "Using Bazel build system for Android ${{ github.event.inputs.android_version }}"
+            tools/bazel run //common:kernel_${{ github.event.inputs.target_arch }}_dist OUTPUT_PATH="out/kernel_${{ github.event.inputs.target_arch }}"
           fi
+          echo "OUTPUT_PATH=$OUTPUT_PATH" >> $GITHUB_ENV
         continue-on-error: true
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v4.6.2
         with:
-          name: kernel-driver-${{ github.event.inputs.target_arch }}-${{ github.event.inputs.driver_name }}
+          name: kernel-driver-${{ github.event.inputs.target_arch }}
           path: |
-            ${{ env.DRIVER_PATH }}
+            android-kernel/${{ env.OUTPUT_PATH }}
