@@ -1,4 +1,4 @@
-name: Build Xiaomi umi-q-oss kernel driver
+name: Build Xiaomi umi-q-oss kernel driver – no scripts tools
 
 on:
   workflow_dispatch:
@@ -21,7 +21,7 @@ jobs:
         with:
           path: driver-src
 
-      # 2. 小米官方内核
+      # 2. 官方内核（浅克隆）
       - name: Checkout Xiaomi umi-q-oss kernel
         uses: actions/checkout@v4
         with:
@@ -41,45 +41,46 @@ jobs:
       - name: Increase frame-size limit
         run: |
           cd kernel
-          find . -name "Makefile*" -exec sed -i 's/-Wframe-larger-than=[0-9]*/-Wframe-larger-than=4096/g' {} +
-          grep -q "FRAME_WARN" Makefile || echo 'KBUILD_CFLAGS += -Wframe-larger-than=4096' >> Makefile
+          find . -name "Makefile*" -exec sed -i 's/-Wframe-larger-than=[0-9]*/-Wframe-larger-than=8192/g' {} +
+          grep -q "FRAME_WARN" Makefile || echo 'KBUILD_CFLAGS += -Wframe-larger-than=8192' >> Makefile
 
-      # 5. Python2→3 转换
+      # 5. Python2→3
       - name: Convert Python2→3 via 2to3
         run: |
           cd kernel
           sudo apt-get update && sudo apt-get install -y 2to3
           2to3 -w -n scripts/gcc-wrapper.py
 
-      # 6. 关闭模块签名 + 摘掉 sign-file 编译（绕过 OpenSSL 3.0 废弃 API）
-      - name: Disable module signing & sign-file build
+      # 6. 关闭模块签名 + 摘掉 **全部** host 工具（dtc & sign-file）
+      - name: Disable host tools that break with OpenSSL 3 / dtc
         run: |
           cd kernel
-          # 关闭签名相关配置
-          scripts/config --disable MODULE_SIG
-          scripts/config --disable MODULE_SIG_ALL
-          scripts/config --disable MODULE_SIG_SHA512
-          scripts/config --disable MODULE_SIG_KEY
-          scripts/config --disable SYSTEM_TRUSTED_KEYRING
-          scripts/config --disable SYSTEM_TRUSTED_KEYS
-          # 从 scripts/Makefile 里摘掉 sign-file 目标
+          # 关签名
+          for cfg in MODULE_SIG MODULE_SIG_ALL MODULE_SIG_SHA512 MODULE_SIG_KEY \
+                     SYSTEM_TRUSTED_KEYRING SYSTEM_TRUSTED_KEYS; do
+            scripts/config --disable $cfg
+          done
+          # 摘掉 dtc 相关目标
+          sed -i '/^hostprogs-y.*dtc/d' scripts/Makefile
+          sed -i '/^HOSTCFLAGS.*dtc/d' scripts/Makefile
+          # 摘掉 sign-file 相关目标
           sed -i '/^hostprogs-y.*sign-file/d' scripts/Makefile
           sed -i '/^HOSTCFLAGS_sign-file/d'   scripts/Makefile
 
-      # 7. 装交叉编译器
+      # 7. 装依赖
       - name: Install toolchain & deps
         run: |
           sudo apt-get update
           sudo apt-get install -y gcc-aarch64-linux-gnu build-essential flex bison libssl-dev libelf-dev bc python3
 
-      # 8. 编译内核 + modules
-      - name: Build kernel modules
+      # 8. 只编 modules（不碰 Image/zImage，也不编 scripts）
+      - name: Build kernel modules only
         run: |
           cd kernel
           export ARCH=arm64
           export CROSS_COMPILE=aarch64-linux-gnu-
           make umi_user_defconfig
-          make -j$(nproc) modules
+          make modules -j$(nproc)
 
       # 9. 收集 ko
       - name: Collect ko files
@@ -87,7 +88,7 @@ jobs:
           mkdir -p $GITHUB_WORKSPACE/out
           find kernel -name "*.ko" -exec cp {} $GITHUB_WORKSPACE/out/ \;
 
-      # 10. 上传产物
+      # 10. 上传
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
