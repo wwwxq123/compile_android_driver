@@ -44,12 +44,12 @@ jobs:
           find . -name "Makefile*" -exec sed -i 's/-Wframe-larger-than=[0-9]*/-Wframe-larger-than=4096/g' {} +
           grep -q "FRAME_WARN" Makefile || echo 'KBUILD_CFLAGS += -Wframe-larger-than=4096' >> Makefile
 
-      # 5. 修复 Python2→3 语法错误（关键步骤）
-      - name: Fix Python2→3 print syntax in gcc-wrapper.py
+      # 5. 用 2to3 一键把整脚本转成 Python3 语法（关键修复）
+      - name: Convert Python2→3 via 2to3
         run: |
           cd kernel
-          sed -i 's/print\s\+"/print("/g; s/"$/")/g' scripts/gcc-wrapper.py
-          sed -i "s/print '/print('/g; s/'$/')/g" scripts/gcc-wrapper.py
+          sudo apt-get update && sudo apt-get install -y 2to3
+          2to3 -w -n scripts/gcc-wrapper.py
 
       # 6. 装交叉编译器及依赖
       - name: Install toolchain & deps
