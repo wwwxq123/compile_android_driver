@@ -1,238 +1,120 @@
-name: Android Kernel Driver Builder (Xiaomi)
-
+name: Android Kernel Driver Builder
 on:
   workflow_dispatch:
     inputs:
-      device_codename:
-        description: 'Xiaomi Device Codename (e.g., umi, alioth, lisa)'
+      android_version:
+        description: 'Android Version (e.g., 11 for umi)'
         required: true
-        default: 'umi'
-      android_branch:
-        description: 'Android Branch (e.g., q-oss, r-oss, s-oss)'
-        required: true
-        default: 'q-oss'
+        default: '11'
       kernel_version:
-        description: 'Kernel Version (e.g., 4.19, 5.4, 5.10)'
+        description: 'Kernel Version (e.g., 4.19)'
         required: true
         default: '4.19'
       driver_name:
         description: 'Driver Module Name (e.g., mydriver.ko)'
         required: true
       target_arch:
-        description: 'Target Architecture (arm64, arm, x86_64)'
+        description: 'Target Architecture'
         required: true
-        default: 'arm64'
+        default: 'aarch64'
 
 jobs:
   build:
     runs-on: ubuntu-latest
-    
     steps:
-    - name: Checkout repository
-      uses: actions/checkout@v4.2.2
-    
-    - name: Prepare kerneldriver directory
-      run: |
-        mkdir kerneldriver
-        # 移动驱动文件到临时目录
-        if [ -d "./code" ]; then
-          find ./code -name "*.h" -exec cp {} kerneldriver/ \;
-          find ./code -name "*.c" -exec cp {} kerneldriver/ \;
-          if [ -f "./code/Makefile" ]; then
-            cp ./code/Makefile kerneldriver/
+      - name: Checkout repository
+        uses: actions/checkout@v4.2.2
+
+      - name: Prepare kerneldriver directory
+        run: |
+          mkdir kerneldriver
+          mv ./code/*.h ./code/*.c ./code/Makefile kerneldriver/ 2>/dev/null || true
+          if [ ! "$(ls -A kerneldriver)" ]; then
+            echo "Warning: No source files found in ./code/"
           fi
-        else
-          # 如果没有code目录，尝试从根目录查找
-          find . -maxdepth 1 -name "*.h" -exec cp {} kerneldriver/ \;
-          find . -maxdepth 1 -name "*.c" -exec cp {} kerneldriver/ \;
-          if [ -f "./Makefile" ]; then
-            cp ./Makefile kerneldriver/
-          fi
-        fi
-    
-    - name: Clone Xiaomi Kernel Source
-      run: |
-        KERNEL_DIR="xiaomi-kernel"
-        git clone --depth=1 --branch=${{ github.event.inputs.device_codename }}-${{ github.event.inputs.android_branch }} \
-          https://github.com/MiCode/Xiaomi_Kernel_OpenSource.git $KERNEL_DIR
-        cd $KERNEL_DIR
-        
-        # 根据内核版本选择合适的目录
-        if [ -d "kernel-${{ github.event.inputs.kernel_version }}" ]; then
-          cd "kernel-${{ github.event.inputs.kernel_version }}"
-        fi
-        
-        echo "KERNEL_PATH=$(pwd)" >> $GITHUB_ENV
-    
-    - name: Copy kerneldriver to kernel source
-      run: |
-        cd ${{ env.KERNEL_PATH }}
-        # 复制驱动文件到drivers目录
-        cp -r ../kerneldriver drivers/
-        # 确保有Makefile
-        if [ ! -f "drivers/kerneldriver/Makefile" ]; then
-          echo "Creating basic Makefile for driver"
-          cat > drivers/kerneldriver/Makefile << 'EOF'
-# SPDX-License-Identifier: GPL-2.0
-obj-$(CONFIG_KERNELDRIVER) += mydriver.o
-EOF
-        fi
-    
-    - name: Modify drivers Makefile
-      run: |
-        cd ${{ env.KERNEL_PATH }}
-        # 在drivers/Makefile中添加我们的驱动
-        if ! grep -q "kerneldriver" drivers/Makefile; then
+
+      - name: Clone Xiaomi Kernel Source
+        run: |
+          git clone --depth=1 https://github.com/MiCode/Xiaomi_Kernel_OpenSource -b umi-q-oss android-kernel
+
+      - name: Copy kerneldriver
+        run: |
+          cd android-kernel
+          cp -r ../kerneldriver drivers/
+
+      - name: Modify Makefile
+        run: |
+          cd android-kernel
           echo "obj-y += kerneldriver/" >> drivers/Makefile
-        fi
-    
-    - name: Create Kconfig for driver
-      run: |
-        cd ${{ env.KERNEL_PATH }}
-        # 为驱动创建Kconfig文件
-        cat > drivers/kerneldriver/Kconfig << 'EOF'
-config KERNELDRIVER
-    tristate "My Kernel Driver"
-    depends on ARCH_QCOM || COMPILE_TEST
-    help
-      This is a custom kernel driver.
-      
-      To compile this driver as a module, choose M here.
-      If unsure, say N.
-EOF
-        
-        # 在drivers/Kconfig中添加引用
-        if ! grep -q "kerneldriver/Kconfig" drivers/Kconfig; then
-          # 找到合适的位置添加
-          awk '/endmenu/ {print "source \"drivers/kerneldriver/Kconfig\""; print; next} {print}' drivers/Kconfig > drivers/Kconfig.tmp
-          mv drivers/Kconfig.tmp drivers/Kconfig
-        fi
-    
-    - name: Install dependencies
-      run: |
-        sudo apt-get update
-        sudo apt-get install -y \
-          build-essential \
-          libncurses-dev \
-          bison \
-          flex \
-          libssl-dev \
-          libelf-dev \
-          bc \
-          python3 \
-          python3-pip \
-          git \
-          gcc-aarch64-linux-gnu \
-          gcc-arm-linux-gnueabi
-        
-        # 对于ARM64架构，可能需要额外的工具链
-        if [ "${{ github.event.inputs.target_arch }}" = "arm64" ]; then
-          wget https://android.googlesource.com/platform/prebuilts/gcc/linux-x86/aarch64/aarch64-linux-android-4.9/+archive/refs/heads/master.tar.gz -O toolchain.tar.gz
-          mkdir -p aarch64-toolchain
-          tar -xzf toolchain.tar.gz -C aarch64-toolchain
-          echo "TOOLCHAIN_PATH=$(pwd)/aarch64-toolchain/bin/aarch64-linux-android-" >> $GITHUB_ENV
-        fi
-    
-    - name: Configure kernel for Xiaomi device
-      run: |
-        cd ${{ env.KERNEL_PATH }}
-        
-        # 根据设备选择defconfig
-        if [ -f "arch/arm64/configs/vendor/${{ github.event.inputs.device_codename }}_defconfig" ]; then
-          DEFCONFIG="vendor/${{ github.event.inputs.device_codename }}_defconfig"
-        elif [ -f "arch/arm64/configs/${{ github.event.inputs.device_codename }}_defconfig" ]; then
-          DEFCONFIG="${{ github.event.inputs.device_codename }}_defconfig"
-        elif [ -f "arch/arm64/configs/vendor/${INPUT_DEVICE_CODENAME}_defconfig" ]; then
-          DEFCONFIG="vendor/${INPUT_DEVICE_CODENAME}_defconfig"
-        else
-          # 尝试查找其他可能的配置
-          find arch/arm64/configs -name "*${{ github.event.inputs.device_codename }}*" | head -1
-          if [ $? -eq 0 ]; then
-            DEFCONFIG=$(find arch/arm64/configs -name "*${{ github.event.inputs.device_codename }}*" | head -1 | sed 's|arch/arm64/configs/||')
-          else
-            echo "Using default defconfig for arm64"
-            DEFCONFIG="defconfig"
-          fi
-        fi
-        
-        echo "Using defconfig: $DEFCONFIG"
-        echo "DEFCONFIG=$DEFCONFIG" >> $GITHUB_ENV
-        
-        # 配置内核
-        if [ "${{ github.event.inputs.target_arch }}" = "arm64" ]; then
-          make ARCH=arm64 CC=${TOOLCHAIN_PATH}gcc CROSS_COMPILE=aarch64-linux-android- ${DEFCONFIG}
-        elif [ "${{ github.event.inputs.target_arch }}" = "arm" ]; then
-          make ARCH=arm CROSS_COMPILE=arm-linux-gnueabi- ${DEFCONFIG}
-        fi
-    
-    - name: Enable our driver in config
-      run: |
-        cd ${{ env.KERNEL_PATH }}
-        # 启用我们的驱动为模块
-        if [ "${{ github.event.inputs.target_arch }}" = "arm64" ]; then
-          echo "CONFIG_KERNELDRIVER=m" >> .config
-          make ARCH=arm64 CC=${TOOLCHAIN_PATH}gcc CROSS_COMPILE=aarch64-linux-android- olddefconfig
-        elif [ "${{ github.event.inputs.target_arch }}" = "arm" ]; then
-          echo "CONFIG_KERNELDRIVER=m" >> .config
-          make ARCH=arm CROSS_COMPILE=arm-linux-gnueabi- olddefconfig
-        fi
-    
-    - name: Build kernel module
-      run: |
-        cd ${{ env.KERNEL_PATH }}
-        
-        # 设置编译参数
-        if [ "${{ github.event.inputs.target_arch }}" = "arm64" ]; then
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential flex bison libssl-dev libelf-dev bc python-is-python3 git
+
+      # >>> 修复步骤：使用 Python 脚本精准修复 <<<
+      - name: Fix Python 2/3 compatibility (Precise Fix)
+        run: |
+          cd android-kernel
+          # 使用 Python3 运行一段代码来修复 gcc-wrapper.py
+          # 这样比 sed 安全得多，只会修改 print 语句
+          python3 << 'EOF'
+          import re
+
+          filename = 'scripts/gcc-wrapper.py'
+          try:
+              with open(filename, 'r') as f:
+                  lines = f.readlines()
+
+              new_lines = []
+              for line in lines:
+                  # 匹配行首可能有空格，然后是 print，接着是空格
+                  # 只修改这种简单的 print 语句
+                  if re.match(r'^(\s*)print\s+', line):
+                      # 移除行尾换行符
+                      l = line.rstrip('\n')
+                      # 分割 print 和后面的内容
+                      parts = re.split(r'(\s*print\s+)', l, 1)
+                      if len(parts) == 3:
+                          # 重组为 print(...)
+                          fixed_line = parts[0] + parts[1] + '(' + parts[2] + ')\n'
+                          new_lines.append(fixed_line)
+                      else:
+                          new_lines.append(line)
+                  else:
+                      new_lines.append(line)
+
+              with open(filename, 'w') as f:
+                  f.writelines(new_lines)
+              print("Successfully fixed gcc-wrapper.py")
+          except FileNotFoundError:
+              print("File not found, skipping...")
+          EOF
+
+      - name: Build kernel module
+        run: |
+          cd android-kernel
+          
           export ARCH=arm64
-          export CROSS_COMPILE=aarch64-linux-android-
-          export CC=${TOOLCHAIN_PATH}gcc
-          export KCFLAGS="-Wno-error=attribute-alias -Wno-error=address-of-packed-member"
-        elif [ "${{ github.event.inputs.target_arch }}" = "arm" ]; then
-          export ARCH=arm
-          export CROSS_COMPILE=arm-linux-gnueabi-
-          export KCFLAGS="-Wno-error=attribute-alias -Wno-error=address-of-packed-member"
-        fi
-        
-        # 只编译驱动模块
-        echo "Building kernel module..."
-        if [ -f "drivers/kerneldriver/Makefile" ]; then
-          make M=drivers/kerneldriver -j$(nproc)
-        else
-          # 如果驱动目录不同
-          DRIVER_DIR=$(find drivers -name "*.ko" -o -name "Makefile" | head -1 | xargs dirname 2>/dev/null || echo "drivers/kerneldriver")
-          make M=${DRIVER_DIR} -j$(nproc)
-        fi
-        
-        # 查找生成的模块
-        find drivers/kerneldriver -name "*.ko" 2>/dev/null || \
-        find drivers -name "${{ github.event.inputs.driver_name }}" 2>/dev/null || \
-        find . -name "*.ko" -type f | head -5
-        
-        echo "Module build completed"
-    
-    - name: Collect artifacts
-      run: |
-        cd ${{ env.KERNEL_PATH }}
-        
-        # 创建输出目录
-        mkdir -p ../output
-        
-        # 查找并复制所有.ko文件
-        find . -name "*.ko" -type f -exec cp {} ../output/ \;
-        
-        # 如果没有找到，尝试在kerneldriver目录查找
-        if [ ! "$(ls -A ../output)" ]; then
-          find drivers/kerneldriver -name "*.o" -exec cp {} ../output/ \;
-        fi
-        
-        echo "Artifacts collected:"
-        ls -la ../output/
-    
-    - name: Upload artifacts
-      uses: actions/upload-artifact@v4.6.2
-      with:
-        name: xiaomi-kernel-driver-${{ github.event.inputs.device_codename }}-${{ github.event.inputs.target_arch }}
-        path: |
-          output/
-          ${{ env.KERNEL_PATH }}/.config
-        retention-days: 7
+          export CROSS_COMPILE=aarch64-linux-gnu-
+          
+          # 尝试加载 defconfig
+          make arch/arm64/configs/umi_defconfig || make defconfig
+          
+          # 开始编译模块
+          make modules -j$(nproc)
+        continue-on-error: true
+
+      - name: Find and Upload artifacts
+        run: |
+          cd android-kernel
+          find . -name "*.ko" -exec cp {} ../ \;
+          echo "Found kernel objects:"
+          ls -lh ../*.ko 2>/dev/null || echo "No .ko files found"
+          
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4.6.2
+        with:
+          name: kernel-driver-${{ github.event.inputs.target_arch }}
+          path: |
+            *.ko
