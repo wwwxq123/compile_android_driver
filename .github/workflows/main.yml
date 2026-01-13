@@ -15,7 +15,7 @@ jobs:
   build:
     runs-on: ubuntu-latest
     steps:
-      # 1. 把你的驱动源码拿进来
+      # 1. 把你的驱动源码（code/ 目录）拿进来
       - name: Checkout driver source
         uses: actions/checkout@v4
         with:
@@ -34,17 +34,17 @@ jobs:
       - name: Copy driver into kernel tree
         run: |
           mkdir -p kernel/drivers/kerneldriver
-          cp -r driver-src/* kernel/drivers/kerneldriver/
+          cp -r driver-src/code/* kernel/drivers/kerneldriver/
           echo "obj-m += kerneldriver/" >> kernel/drivers/Makefile
 
-      # 4. 放大帧栈警告门限（保持和你原脚本一致）
+      # 4. 放大帧栈警告门限（可选，保持和你原脚本一致）
       - name: Increase frame-size limit
         run: |
           cd kernel
           find . -name "Makefile*" -exec sed -i 's/-Wframe-larger-than=[0-9]*/-Wframe-larger-than=4096/g' {} +
           grep -q "FRAME_WARN" Makefile || echo 'KBUILD_CFLAGS += -Wframe-larger-than=4096' >> Makefile
 
-      # 5. 用 2to3 一键把整脚本转成 Python3 语法（关键修复）
+      # 5. 用 2to3 一键把 Python2 脚本转成 Python3（关键修复）
       - name: Convert Python2→3 via 2to3
         run: |
           cd kernel
@@ -64,7 +64,7 @@ jobs:
           export ARCH=arm64
           export CROSS_COMPILE=aarch64-linux-gnu-
           make vendor/xiaomi/umi_defconfig
-          make -j$(nproc) Image.gz modules
+          make -j$(nproc) modules
 
       # 8. 收集 ko 文件
       - name: Collect ko files
