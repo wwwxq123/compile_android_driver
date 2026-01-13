@@ -15,13 +15,13 @@ jobs:
   build:
     runs-on: ubuntu-latest
     steps:
-      # 1. 把你的驱动源码（code/ 目录）拿进来
+      # 1. 驱动源码
       - name: Checkout driver source
         uses: actions/checkout@v4
         with:
           path: driver-src
 
-      # 2. 拉取小米 10 官方内核源码（umi-q-oss 分支）
+      # 2. 小米官方内核
       - name: Checkout Xiaomi umi-q-oss kernel
         uses: actions/checkout@v4
         with:
@@ -30,50 +30,57 @@ jobs:
           path: kernel
           fetch-depth: 1
 
-      # 3. 把驱动拷到 drivers/ 下，并追加到 Makefile
+      # 3. 复制驱动并加入编译
       - name: Copy driver into kernel tree
         run: |
           mkdir -p kernel/drivers/kerneldriver
           cp -r driver-src/code/* kernel/drivers/kerneldriver/
           echo "obj-m += kerneldriver/" >> kernel/drivers/Makefile
 
-      # 4. 放大帧栈警告门限（可选，保持和你原脚本一致）
+      # 4. 放大帧栈门限
       - name: Increase frame-size limit
         run: |
           cd kernel
           find . -name "Makefile*" -exec sed -i 's/-Wframe-larger-than=[0-9]*/-Wframe-larger-than=4096/g' {} +
           grep -q "FRAME_WARN" Makefile || echo 'KBUILD_CFLAGS += -Wframe-larger-than=4096' >> Makefile
 
-      # 5. 用 2to3 一键把 Python2 脚本转成 Python3（关键修复）
+      # 5. Python2→3 转换
       - name: Convert Python2→3 via 2to3
         run: |
           cd kernel
           sudo apt-get update && sudo apt-get install -y 2to3
           2to3 -w -n scripts/gcc-wrapper.py
 
-      # 6. 装交叉编译器及依赖
+      # 6. 修复 OpenSSL 3.0 废弃警告导致 -Werror 失败
+      - name: Fix sign-file OpenSSL 3.0 deprecations
+        run: |
+          cd kernel
+          # 去掉 -Werror 并忽略废弃声明
+          sed -i 's/-Werror/ /g' scripts/Makefile
+          echo 'CFLAGS_sign-file.o += -Wno-deprecated-declarations' >> scripts/Makefile
+
+      # 7. 装交叉编译器
       - name: Install toolchain & deps
         run: |
           sudo apt-get update
           sudo apt-get install -y gcc-aarch64-linux-gnu build-essential flex bison libssl-dev libelf-dev bc python3
 
-      # 7. 编译内核 + modules（defconfig 路径已修正）
+      # 8. 编译内核 + modules
       - name: Build kernel modules
         run: |
           cd kernel
           export ARCH=arm64
           export CROSS_COMPILE=aarch64-linux-gnu-
           make umi_user_defconfig
-          # ← 正确路径
           make -j$(nproc) modules
 
-      # 8. 收集 ko 文件
+      # 9. 收集 ko
       - name: Collect ko files
         run: |
           mkdir -p $GITHUB_WORKSPACE/out
           find kernel -name "*.ko" -exec cp {} $GITHUB_WORKSPACE/out/ \;
 
-      # 9. 上传产物
+      # 10. 上传产物
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
