@@ -63,7 +63,8 @@ jobs:
           cd kernel
           export ARCH=arm64
           export CROSS_COMPILE=aarch64-linux-gnu-
-          make umi_defconfig          # ← 正确路径
+          make umi_user_defconfig
+          # ← 正确路径
           make -j$(nproc) modules
 
       # 8. 收集 ko 文件
