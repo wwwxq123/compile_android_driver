@@ -1,40 +1,10 @@
-name: Build Xiaomi umi-q-oss kernel driver – no scripts tools
-
-on:
-  workflow_dispatch:
-    inputs:
-      driver_name:
-        description: 'Driver module name (e.g. mydriver.ko)'
-        required: true
-      target_arch:
-        description: 'Target architecture'
-        required: true
-        default: 'aarch64'
-
-jobs:
-  build:
-    runs-on: ubuntu-latest
-    steps:
-      # 1. 驱动源码
-      - name: Checkout driver source
-        uses: actions/checkout@v4
-        with:
-          path: driver-src
-
-      # 2. 官方内核（浅克隆）
-      - name: Checkout Xiaomi umi-q-oss kernel
-        uses: actions/checkout@v4
-        with:
-          repository: MiCode/Xiaomi_Kernel_OpenSource
-          ref: umi-q-oss
-          path: kernel
-          fetch-depth: 1
-
-      # 3. 复制驱动
-      - name: Copy driver into kernel tree
+- name: Build kernel modules only
         run: |
-          mkdir -p kernel/drivers/kerneldriver
-          cp -r driver-src/code/* kernel/drivers/kerneldriver/
+          cd kernel
+          export ARCH=arm64
+          export CROSS_COMPILE=aarch64-linux-gnu-
+          make umi_user_defconfig
+          make modules -j$(nproc)          cp -r driver-src/code/* kernel/drivers/kerneldriver/
           echo "obj-m += kerneldriver/" >> kernel/drivers/Makefile
 
       # 4. 放大帧栈门限
