@@ -69,6 +69,16 @@ jobs:
       - name: Build kernel modules only
         run: |
           cd kernel
+          
+          # --- 修复部分 ---
+          # 彻底禁用宿主机工具编译，解决 DTC 链接错误和 sign-file OpenSSL 警告
+          # 交叉编译 .ko 文件通常不需要生成宿主机端的二进制工具
+          echo "HOSTCC := false" >> Makefile
+          echo "HOSTCXX := false" >> Makefile
+          echo "HOSTLD := false" >> Makefile
+          echo "HOSTAR := false" >> Makefile
+          # ----------------
+
           export ARCH=arm64
           export CROSS_COMPILE=aarch64-linux-gnu-
           make umi_user_defconfig
