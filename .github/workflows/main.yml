@@ -58,7 +58,7 @@ jobs:
           sed -i '/^subdir-y.*dtc/d' scripts/Makefile
           sed -i '/^hostprogs-y.*sign-file/d' scripts/Makefile
           sed -i '/^HOSTCFLAGS_sign-file/d'   scripts/Makefile
-          # 去掉 -Werror
+          # 去掉 -Werror (这一步很重要，防止 OpenSSL 警报变成错误)
           find scripts -name "Makefile*" -exec sed -i 's/-Werror/ /g' {} +
 
       - name: Install toolchain & deps
@@ -70,14 +70,14 @@ jobs:
         run: |
           cd kernel
           
-          # --- 修复部分 ---
-          # 彻底禁用宿主机工具编译，解决 DTC 链接错误和 sign-file OpenSSL 警告
-          # 交叉编译 .ko 文件通常不需要生成宿主机端的二进制工具
-          echo "HOSTCC := false" >> Makefile
-          echo "HOSTCXX := false" >> Makefile
-          echo "HOSTLD := false" >> Makefile
-          echo "HOSTAR := false" >> Makefile
-          # ----------------
+          # --- 修复部分 (v3) ---
+          # 我们只针对特定目标进行屏蔽，保留 basic/fixdep
+          # 这会阻止 Make 尝试构建 scripts/dtc 和 scripts/mod/sign-file
+          echo "scripts/dtc:" >> Makefile
+          echo "	@echo 'Skipping dtc build due to host toolchain issues'" >> Makefile
+          echo "scripts/mod/sign-file:" >> Makefile
+          echo "	@echo 'Skipping sign-file build due to OpenSSL issues'" >> Makefile
+          # ---------------------
 
           export ARCH=arm64
           export CROSS_COMPILE=aarch64-linux-gnu-
