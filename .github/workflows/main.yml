@@ -1,4 +1,4 @@
-name: Android Kernel Driver Builder (Xiaomi umi-q-oss)
+name: Build Xiaomi umi-q-oss kernel driver
 
 on:
   workflow_dispatch:
@@ -15,40 +15,49 @@ jobs:
   build:
     runs-on: ubuntu-latest
     steps:
+      # 1. 把你的驱动源码拿进来
       - name: Checkout driver source
         uses: actions/checkout@v4
         with:
           path: driver-src
 
+      # 2. 拉取小米 10 官方内核源码（umi-q-oss 分支）
       - name: Checkout Xiaomi umi-q-oss kernel
         uses: actions/checkout@v4
         with:
           repository: MiCode/Xiaomi_Kernel_OpenSource
           ref: umi-q-oss
           path: kernel
-          fetch-depth: 1          # 浅克隆加速
+          fetch-depth: 1
 
-      # 把驱动拷到 drivers/ 下（保持和你原脚本相同目录结构）
+      # 3. 把驱动拷到 drivers/ 下，并追加到 Makefile
       - name: Copy driver into kernel tree
         run: |
           mkdir -p kernel/drivers/kerneldriver
           cp -r driver-src/* kernel/drivers/kerneldriver/
           echo "obj-m += kerneldriver/" >> kernel/drivers/Makefile
 
-      # 可选：放大帧栈警告门限（保持和你原脚本一致）
+      # 4. 放大帧栈警告门限（保持和你原脚本一致）
       - name: Increase frame-size limit
         run: |
           cd kernel
           find . -name "Makefile*" -exec sed -i 's/-Wframe-larger-than=[0-9]*/-Wframe-larger-than=4096/g' {} +
           grep -q "FRAME_WARN" Makefile || echo 'KBUILD_CFLAGS += -Wframe-larger-than=4096' >> Makefile
 
-      # 装交叉编译器（GitHub 默认镜像里没 aarch64-linux-android-，用 gcc-aarch64-linux-gnu 可过编译）
+      # 5. 修复 Python2→3 语法错误（关键步骤）
+      - name: Fix Python2→3 print syntax in gcc-wrapper.py
+        run: |
+          cd kernel
+          sed -i 's/print\s\+"/print("/g; s/"$/")/g' scripts/gcc-wrapper.py
+          sed -i "s/print '/print('/g; s/'$/')/g" scripts/gcc-wrapper.py
+
+      # 6. 装交叉编译器及依赖
       - name: Install toolchain & deps
         run: |
           sudo apt-get update
           sudo apt-get install -y gcc-aarch64-linux-gnu build-essential flex bison libssl-dev libelf-dev bc python3
 
-      # 编译 Image + modules
+      # 7. 编译内核 + modules
       - name: Build kernel modules
         run: |
           cd kernel
@@ -57,12 +66,13 @@ jobs:
           make vendor/xiaomi/umi_defconfig
           make -j$(nproc) Image.gz modules
 
-      # 收集 ko
+      # 8. 收集 ko 文件
       - name: Collect ko files
         run: |
           mkdir -p $GITHUB_WORKSPACE/out
           find kernel -name "*.ko" -exec cp {} $GITHUB_WORKSPACE/out/ \;
 
+      # 9. 上传产物
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
