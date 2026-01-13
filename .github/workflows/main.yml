@@ -29,13 +29,11 @@ jobs:
         run: |
           mkdir kerneldriver
           mv ./code/*.h ./code/*.c ./code/Makefile kerneldriver/ 2>/dev/null || true
-          # 确保目录存在且不为空
           if [ ! "$(ls -A kerneldriver)" ]; then
             echo "Warning: No source files found in ./code/"
           fi
 
       - name: Clone Xiaomi Kernel Source
-        # 直接克隆小米仓库，不使用 repo 工具
         run: |
           git clone --depth=1 https://github.com/MiCode/Xiaomi_Kernel_OpenSource -b umi-q-oss android-kernel
 
@@ -47,43 +45,46 @@ jobs:
       - name: Modify Makefile
         run: |
           cd android-kernel
-          # 将驱动目录加入编译系统
           echo "obj-y += kerneldriver/" >> drivers/Makefile
-          echo "Added kerneldriver to drivers/Makefile"
 
       - name: Install dependencies
         run: |
           sudo apt-get update
           sudo apt-get install -y build-essential flex bison libssl-dev libelf-dev bc python-is-python3 git
 
+      # >>> 新增步骤：修复 Python 3 兼容性 <<<
+      - name: Fix Python 2/3 compatibility
+        run: |
+          cd android-kernel
+          # 修复 scripts/gcc-wrapper.py 中的 print 语法错误 (Python 2 -> Python 3)
+          if [ -f "scripts/gcc-wrapper.py" ]; then
+            sed -i 's/print "/print("/g' scripts/gcc-wrapper.py
+            sed -i 's/",/",)/g' scripts/gcc-wrapper.py
+            echo "Fixed gcc-wrapper.py for Python 3"
+          fi
+
       - name: Build kernel module
         run: |
           cd android-kernel
           
-          # 设置构建环境变量
           export ARCH=arm64
-          export SUBARCH=arm64
+          export CROSS_COMPILE=aarch64-linux-gnu-
           
-          # 小米 umi 分支通常使用 build.config.gki.aarch64
-          # 如果该文件不存在，可能需要调整为 build.config.umi 或手动指定 defconfig
-          if [ -f "common/build.config.gki.aarch64" ]; then
-             BUILD_CONFIG=common/build.config.gki.aarch64 LTO=thin build/build.sh -j$(nproc)
-          elif [ -f "build.config.umi" ]; then
-             BUILD_CONFIG=build.config.umi build/build.sh -j$(nproc)
-          else
-             # 兜底方案：直接使用 make
-             make arch/arm64/configs/umi_defconfig
-             make modules -j$(nproc)
-          fi
+          # 尝试加载 defconfig
+          # 小米 umi 可能使用 umi_defconfig，如果不存在则用默认的
+          make arch/arm64/configs/umi_defconfig || make defconfig
+          
+          # 开始编译模块
+          make modules -j$(nproc)
         continue-on-error: true
 
       - name: Find and Upload artifacts
         run: |
           cd android-kernel
-          # 查找生成的 .ko 文件
+          # 将编译出的 .ko 文件复制到外层
           find . -name "*.ko" -exec cp {} ../ \;
           echo "Found kernel objects:"
-          ls -lh ../*.ko 2>/dev/null || echo "No .ko files found in root"
+          ls -lh ../*.ko 2>/dev/null || echo "No .ko files found"
           
       - name: Upload artifacts
         uses: actions/upload-artifact@v4.6.2
